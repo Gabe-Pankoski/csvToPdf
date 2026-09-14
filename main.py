@@ -21,7 +21,6 @@ from datetime import datetime
 from pathlib import Path
 
 from fpdf import FPDF
-from fpdf.fonts import FontFace
 
 
 # ── Text helpers ────────────────────────────────────────────────────────
@@ -348,6 +347,39 @@ class FormPDF(FPDF):
         self.cell(0, 6, pdf_safe(f"{self._title}  |  Page {self.page_no()}"), align="C")
 
 
+QUESTION_WIDTH = 60  # mm, as in the original layout
+ROW_HEIGHT = 6  # mm line height for question/answer rows
+
+
+def draw_row(pdf: FPDF, question: str, answer: str) -> None:
+    """Draw one bold question cell and its answer beside it, original style.
+
+    Both cells wrap when their text is too long for the column, and the row
+    moves to a new page as a whole if it would not fit on the current one.
+    """
+    x = PAGE_LEFT + INDENT
+    answer_width = PAGE_RIGHT - x - QUESTION_WIDTH
+    q_text = pdf_safe(f"  {question.rstrip().rstrip(':').rstrip()}:")
+    a_text = pdf_safe(answer)
+
+    pdf.set_font("Helvetica", style="B", size=9)
+    q_height = pdf.multi_cell(QUESTION_WIDTH, ROW_HEIGHT, q_text, align="L", dry_run=True, output="HEIGHT")
+    pdf.set_font("Helvetica", size=9)
+    a_height = pdf.multi_cell(answer_width, ROW_HEIGHT, a_text, align="L", dry_run=True, output="HEIGHT")
+    row_height = max(q_height, a_height)
+
+    if pdf.will_page_break(row_height):
+        pdf.add_page()
+
+    pdf.set_x(x)
+    top = pdf.get_y()
+    pdf.set_font("Helvetica", style="B", size=9)
+    pdf.multi_cell(QUESTION_WIDTH, ROW_HEIGHT, q_text, align="L", new_x="RIGHT", new_y="TOP")
+    pdf.set_font("Helvetica", size=9)
+    pdf.multi_cell(answer_width, ROW_HEIGHT, a_text, align="L", new_x="LMARGIN", new_y="TOP")
+    pdf.set_y(top + row_height)
+
+
 def csv_to_pdf(title: str, records: Records, output_path: Path) -> None:
     pdf = FormPDF(title, orientation="portrait", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=20)
@@ -363,13 +395,13 @@ def csv_to_pdf(title: str, records: Records, output_path: Path) -> None:
     pdf.line(PAGE_LEFT, pdf.get_y(), PAGE_RIGHT, pdf.get_y())
     pdf.ln(6)
 
-    question_style = FontFace(family="Helvetica", emphasis="BOLD", size_pt=9)
-    answer_style = FontFace(family="Helvetica", size_pt=9)
-
     for record_index, ((date, name), sections) in enumerate(records.items()):
-        # Each record starts on a fresh page after the first.
+        # Divider between records (not before the first)
         if record_index > 0:
-            pdf.add_page()
+            pdf.ln(2)
+            pdf.set_line_width(0.6)
+            pdf.line(PAGE_LEFT, pdf.get_y(), PAGE_RIGHT, pdf.get_y())
+            pdf.ln(6)
 
         # ── Record heading ───────────────────────────────────────────
         pdf.set_font("Helvetica", style="B", size=12)
@@ -393,22 +425,8 @@ def csv_to_pdf(title: str, records: Records, output_path: Path) -> None:
             pdf.line(PAGE_LEFT + INDENT, pdf.get_y(), PAGE_RIGHT, pdf.get_y())
             pdf.ln(2)
 
-            pdf.set_font("Helvetica", size=9)
-            with pdf.table(
-                col_widths=(62, 104),
-                width=PAGE_RIGHT - PAGE_LEFT - INDENT,
-                align="LEFT",
-                text_align="LEFT",
-                v_align="TOP",
-                borders_layout="NONE",
-                first_row_as_headings=False,
-                line_height=4.5,
-                padding=(0.6, 1),
-            ) as table:
-                for question, answer in qa_pairs:
-                    row = table.row()
-                    row.cell(pdf_safe(question), style=question_style)
-                    row.cell(pdf_safe(answer), style=answer_style)
+            for question, answer in qa_pairs:
+                draw_row(pdf, question, answer)
 
             pdf.ln(3)
 

@@ -28,8 +28,8 @@ Rows may arrive in any order. Multi-select answers are tab delimited.
 ## FLRA export
 
 One submission is the set of rows sharing a `Form Date` and `Prepared By`.
-Submissions are sorted by date then name, and each starts on a new page with
-the preparer and date in the heading. Sections follow the form's order
+Submissions are sorted by date then name and follow one another, separated by
+a divider, with the preparer and date in each heading. Sections follow the form's order
 (Project/Job Details, Tasks, PPE, risk ratings, hazards, final rating); any
 section not in that list follows in order of first appearance. Questions within
 a section keep the order they first appear in the file so every submission
