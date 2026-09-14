@@ -28,15 +28,18 @@ Rows may arrive in any order. Multi-select answers are tab delimited.
 ## FLRA export
 
 One submission is the set of rows sharing a `Form Date` and `Prepared By`.
-Submissions are sorted by date then name and follow one another, separated by
-a divider, with the preparer and date in each heading. Sections follow the form's order
+The PDF is rendered from an HTML template with WeasyPrint. Each day gets its
+own page with a banner, and every submission on that day is a bordered block
+with the preparer and date in its header. Sections follow the form's order
 (Project/Job Details, Tasks, PPE, risk ratings, hazards, final rating); any
 section not in that list follows in order of first appearance. Questions within
 a section keep the order they first appear in the file so every submission
 lays out the same way.
 
-Tab-delimited answers are joined with commas on one line, multi-line answers
-keep their line breaks, and blanks are shown as `N/A`.
+Each section is a two-column table. Tab-delimited answers become a bullet
+list, multi-line answers keep their line breaks, and a question with no answer
+(or an answer with no question) is shown as an italic note row spanning both
+columns.
 
 The export carries no form id. If one person files two forms on the same day
 they are merged into one submission and each question that was answered

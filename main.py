@@ -14,21 +14,21 @@ Usage::
 """
 
 import csv
+import html as html_lib
 import re
 import sys
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 
-from fpdf import FPDF
+from weasyprint import HTML
 
 
 # ── Text helpers ────────────────────────────────────────────────────────
 
 
 def clean(value: str | None) -> str:
-    stripped = (value or "").strip()
-    return "N/A" if stripped == "" else stripped
+    return (value or "").strip()
 
 
 def normalize_header(value: str | None) -> str:
@@ -75,7 +75,7 @@ def normalize_date(value: str | None) -> str:
 
 
 def split_list(value: str | None) -> list[str]:
-    """Split a delimited answer (tabs first, else commas/semicolons/pipes/newlines)."""
+    """Split a delimited list (tabs first, else commas/semicolons/pipes/newlines)."""
     raw = value or ""
     parts = raw.split("\t") if "\t" in raw else re.split(r"[,;|\n]", raw)
     return [" ".join(part.split()) for part in parts if part.strip()]
@@ -85,23 +85,11 @@ def split_names(value: str | None) -> list[str]:
     return split_list(value)
 
 
-def format_answer(value: str | None) -> str:
-    """Turn a raw answer into display text.
-
-    Tab-delimited multi-select answers are joined with commas on one line,
-    multi-line answers keep their line breaks, and blanks become ``N/A``.
-    """
-    raw = value or ""
-    if "\t" in raw:
-        items = split_list(raw)
-        return ", ".join(items) if items else "N/A"
-    lines = [line.strip() for line in raw.splitlines() if line.strip()]
-    return "\n".join(lines) if lines else "N/A"
-
-
-def pdf_safe(text: str) -> str:
-    """The core Helvetica font only knows cp1252; swap anything else for '?'."""
-    return text.encode("cp1252", errors="replace").decode("cp1252")
+def parse_answers(raw: str | None) -> list[str]:
+    """Split a tab-delimited answer into individual answers, dropping blanks."""
+    if not raw or not raw.strip():
+        return []
+    return [p.strip() for p in raw.split("\t") if p.strip()]
 
 
 # ── CSV reading ─────────────────────────────────────────────────────────
@@ -149,9 +137,11 @@ class Columns:
 
 # ── Data model ──────────────────────────────────────────────────────────
 
-Person = dict[str, list[tuple[str, str]]]  # {section: [(question, answer)]}
+QA = tuple[str, list[str]]  # (question, [answers])
+Person = dict[str, list[QA]]  # {section: [(question, [answers])]}
 RecordKey = tuple[str, str]  # (date, name)
-Records = dict[RecordKey, Person]  # {(date, name): {section: [(question, answer)]}}
+Records = dict[RecordKey, Person]  # {(date, name): {section: [(question, [answers])]}}
+DayData = dict[str, dict[str, Person]]  # {date: {name: {section: [...]}}}
 Presence = dict[str, set[str]]  # {date: {normalized names present}}
 
 DATE_QUESTION = "date"
@@ -185,14 +175,13 @@ def section_rank(section: str, seen: dict[str, int]) -> tuple[int, int]:
 
 
 def parse_records(input_path: Path) -> tuple[str, Records]:
-    """Return (title, {(date, name): {section: [(question, answer)]}}).
+    """Return (title, {(date, name): {section: [(question, [answers])]}}).
 
     Rows are grouped into one record per (Form Date, Prepared By); if a person
     filed several forms that day their distinct answers are listed under the
-    repeated question. Records are
-    sorted by date then name, sections follow ``SECTION_ORDER``, and questions
-    within a section keep the order in which they first appear in the file so
-    every record lays out the same way.
+    repeated question. Records are sorted by date then name, sections follow
+    ``SECTION_ORDER``, and questions within a section keep the order in which
+    they first appear in the file so every record lays out the same way.
 
     If the sheet has no date column, all of a person's rows form one record
     whose date comes from the row whose question is ``Date``.
@@ -212,15 +201,18 @@ def parse_records(input_path: Path) -> tuple[str, Records]:
             if normalize_header(row.get(cols.question)) == normalize_header(DATE_QUESTION):
                 dates_by_name.setdefault(clean(row.get(cols.name)), normalize_date(row.get(cols.answer)))
 
-    grouped: dict[RecordKey, dict[str, dict[str, list[str]]]] = {}
+    grouped: dict[RecordKey, dict[str, dict[str, list[list[str]]]]] = {}
     section_seen: dict[str, int] = {}
     question_seen: dict[str, dict[str, int]] = {}
 
     for row in rows:
         name = clean(row.get(cols.name))
         question = clean(row.get(cols.question))
-        answer = format_answer(row.get(cols.answer))
-        section = clean(row.get(cols.section)) if cols.section else "N/A"
+        answers = parse_answers(row.get(cols.answer))
+        section = clean(row.get(cols.section)) if cols.section else ""
+
+        if not name:
+            continue
 
         if cols.date is not None:
             date = normalize_date(row.get(cols.date))
@@ -232,9 +224,9 @@ def parse_records(input_path: Path) -> tuple[str, Records]:
 
         section_seen.setdefault(section, len(section_seen))
         question_seen.setdefault(section, {}).setdefault(question, len(question_seen[section]))
-        answers = grouped.setdefault((date, name), {}).setdefault(section, {}).setdefault(question, [])
-        if answer not in answers:
-            answers.append(answer)
+        variants = grouped.setdefault((date, name), {}).setdefault(section, {}).setdefault(question, [])
+        if answers not in variants:
+            variants.append(answers)
 
     records: Records = OrderedDict()
     for key in sorted(grouped, key=lambda k: (k[0], normalize_name(k[1]))):
@@ -246,9 +238,9 @@ def parse_records(input_path: Path) -> tuple[str, Records]:
             # person filed more than one form that day (the export has no
             # form id to split them); each answer becomes its own row.
             person[section] = [
-                (question, answer)
+                (question, answers)
                 for question in sorted(sections[section], key=order.__getitem__)
-                for answer in sections[section][question]
+                for answers in sections[section][question]
             ]
         records[key] = person
 
@@ -327,112 +319,255 @@ def filter_records(records: Records, presence: Presence) -> tuple[Records, list[
     return kept, dropped
 
 
-# ── PDF rendering ───────────────────────────────────────────────────────
-
-PAGE_LEFT = 18
-PAGE_RIGHT = 192
-INDENT = 8  # mm indent for sections/rows under each record
-
-
-class FormPDF(FPDF):
-    def __init__(self, title: str, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._title = title
-
-    def footer(self) -> None:
-        self.set_y(-14)
-        self.set_line_width(0.2)
-        self.line(PAGE_LEFT, self.get_y(), PAGE_RIGHT, self.get_y())
-        self.set_font("Helvetica", size=7)
-        self.cell(0, 6, pdf_safe(f"{self._title}  |  Page {self.page_no()}"), align="C")
+def group_by_day(records: Records) -> DayData:
+    """Regroup sorted records as {date: {name: sections}} for rendering."""
+    days: DayData = OrderedDict()
+    for (date, name), sections in records.items():
+        days.setdefault(date, OrderedDict())[name] = sections
+    return days
 
 
-QUESTION_WIDTH = 60  # mm, as in the original layout
-ROW_HEIGHT = 6  # mm line height for question/answer rows
+# ── HTML rendering ──────────────────────────────────────────────────────
 
 
-def draw_row(pdf: FPDF, question: str, answer: str) -> None:
-    """Draw one bold question cell and its answer beside it, original style.
-
-    Both cells wrap when their text is too long for the column, and the row
-    moves to a new page as a whole if it would not fit on the current one.
-    """
-    x = PAGE_LEFT + INDENT
-    answer_width = PAGE_RIGHT - x - QUESTION_WIDTH
-    q_text = pdf_safe(f"  {question.rstrip().rstrip(':').rstrip()}:")
-    a_text = pdf_safe(answer)
-
-    pdf.set_font("Helvetica", style="B", size=9)
-    q_height = pdf.multi_cell(QUESTION_WIDTH, ROW_HEIGHT, q_text, align="L", dry_run=True, output="HEIGHT")
-    pdf.set_font("Helvetica", size=9)
-    a_height = pdf.multi_cell(answer_width, ROW_HEIGHT, a_text, align="L", dry_run=True, output="HEIGHT")
-    row_height = max(q_height, a_height)
-
-    if pdf.will_page_break(row_height):
-        pdf.add_page()
-
-    pdf.set_x(x)
-    top = pdf.get_y()
-    pdf.set_font("Helvetica", style="B", size=9)
-    pdf.multi_cell(QUESTION_WIDTH, ROW_HEIGHT, q_text, align="L", new_x="RIGHT", new_y="TOP")
-    pdf.set_font("Helvetica", size=9)
-    pdf.multi_cell(answer_width, ROW_HEIGHT, a_text, align="L", new_x="LMARGIN", new_y="TOP")
-    pdf.set_y(top + row_height)
+def e(text: str) -> str:
+    """HTML-escape a string."""
+    return html_lib.escape(str(text))
 
 
-def csv_to_pdf(title: str, records: Records, output_path: Path) -> None:
-    pdf = FormPDF(title, orientation="portrait", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=20)
-    pdf.set_left_margin(PAGE_LEFT)
-    pdf.set_right_margin(210 - PAGE_RIGHT)
-    pdf.add_page()
+def e_multiline(text: str) -> str:
+    """HTML-escape a string, keeping its line breaks."""
+    return "<br>".join(e(line.strip()) for line in text.splitlines() if line.strip())
 
-    # ── Title ────────────────────────────────────────────────────────
-    pdf.set_font("Helvetica", style="B", size=16)
-    pdf.cell(0, 10, pdf_safe(title), align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_draw_color(0, 0, 0)
-    pdf.set_line_width(0.4)
-    pdf.line(PAGE_LEFT, pdf.get_y(), PAGE_RIGHT, pdf.get_y())
-    pdf.ln(6)
 
-    for record_index, ((date, name), sections) in enumerate(records.items()):
-        # Divider between records (not before the first)
-        if record_index > 0:
-            pdf.ln(2)
-            pdf.set_line_width(0.6)
-            pdf.line(PAGE_LEFT, pdf.get_y(), PAGE_RIGHT, pdf.get_y())
-            pdf.ln(6)
+def build_html(title: str, days: DayData) -> str:
+    parts: list[str] = []
 
-        # ── Record heading ───────────────────────────────────────────
-        pdf.set_font("Helvetica", style="B", size=12)
-        pdf.cell(28, 8, "Prepared By:")
-        pdf.set_font("Helvetica", size=12)
-        pdf.cell(0, 8, pdf_safe(name), new_x="LMARGIN", new_y="NEXT")
-        if date:
-            pdf.set_font("Helvetica", style="B", size=12)
-            pdf.cell(28, 8, "Date:")
-            pdf.set_font("Helvetica", size=12)
-            pdf.cell(0, 8, pdf_safe(date), new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
+    parts.append(f'<h1 class="doc-title">{e(title)}</h1>')
 
-        # ── Sections (indented) ───────────────────────────────────────
-        pdf.set_left_margin(PAGE_LEFT + INDENT)
-        for section, qa_pairs in sections.items():
-            pdf.set_x(PAGE_LEFT + INDENT)
-            pdf.set_font("Helvetica", style="B", size=10)
-            pdf.cell(0, 7, pdf_safe(section), new_x="LMARGIN", new_y="NEXT")
-            pdf.set_line_width(0.2)
-            pdf.line(PAGE_LEFT + INDENT, pdf.get_y(), PAGE_RIGHT, pdf.get_y())
-            pdf.ln(2)
+    for day_index, (date, people) in enumerate(days.items()):
+        pb = ' style="page-break-before: always;"' if day_index > 0 else ""
+        parts.append(f'<div class="day-section"{pb}>')
+        parts.append(f'  <div class="day-header">{e(date)}</div>')
 
-            for question, answer in qa_pairs:
-                draw_row(pdf, question, answer)
+        for name, sections in people.items():
+            parts.append('  <div class="person-block">')
+            parts.append(
+                f'    <div class="person-header">'
+                f'<span class="person-label">Prepared By:</span>'
+                f'<span class="person-name">{e(name)}</span>'
+                f'<span class="person-date-label">Date:</span>'
+                f'<span class="person-date">{e(date)}</span>'
+                f'</div>'
+            )
 
-            pdf.ln(3)
+            for section, qa_pairs in sections.items():
+                parts.append('    <div class="section-block">')
+                parts.append(f'      <div class="section-header">{e(section)}</div>')
+                parts.append('      <table class="qa-table">')
 
-        pdf.set_left_margin(PAGE_LEFT)
+                for question, answers in qa_pairs:
+                    if not question and not answers:
+                        continue
 
-    pdf.output(str(output_path))
+                    if not question or not answers:
+                        # Instructional/note row — spans both columns
+                        text = e(question) if question else e(" | ".join(answers))
+                        parts.append(
+                            f'        <tr class="note-row">'
+                            f'<td colspan="2"><em>{text}</em></td></tr>'
+                        )
+                        continue
+
+                    if len(answers) == 1:
+                        answer_html = e_multiline(answers[0])
+                    else:
+                        items = "".join(f"<li>{e_multiline(a)}</li>" for a in answers)
+                        answer_html = f"<ul>{items}</ul>"
+
+                    parts.append(
+                        f'        <tr>'
+                        f'<th>{e(question)}</th>'
+                        f'<td>{answer_html}</td>'
+                        f'</tr>'
+                    )
+
+                parts.append('      </table>')
+                parts.append('    </div>')  # section-block
+
+            parts.append('  </div>')  # person-block
+
+        parts.append('</div>')  # day-section
+
+    return "\n".join(parts)
+
+
+CSS = """
+@page {
+    size: A4;
+    margin: 16mm 16mm 22mm 16mm;
+    @bottom-left {
+        content: string(doc-title);
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 7pt;
+        color: #555;
+        border-top: 0.5pt solid #bbb;
+        padding-top: 4pt;
+    }
+    @bottom-right {
+        content: "Page " counter(page) " of " counter(pages);
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 7pt;
+        color: #555;
+        border-top: 0.5pt solid #bbb;
+        padding-top: 4pt;
+    }
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 9pt;
+    line-height: 1.45;
+    color: #1a1a1a;
+    background: #fff;
+}
+
+/* ── Document title ─────────────────────────────────── */
+.doc-title {
+    font-size: 18pt;
+    font-weight: bold;
+    text-align: center;
+    color: #1e3a5f;
+    padding: 10pt 0 8pt;
+    border-bottom: 2pt solid #1e3a5f;
+    margin-bottom: 14pt;
+    string-set: doc-title content();
+}
+
+/* ── Day section ────────────────────────────────────── */
+.day-section {
+    margin-bottom: 10pt;
+}
+
+.day-header {
+    background-color: #1e3a5f;
+    color: #ffffff;
+    font-size: 12pt;
+    font-weight: bold;
+    padding: 5pt 8pt;
+    letter-spacing: 0.03em;
+    margin-bottom: 8pt;
+}
+
+/* ── Person block ───────────────────────────────────── */
+.person-block {
+    margin: 0 0 10pt 6mm;
+    border: 0.5pt solid #c8d0da;
+    border-radius: 2pt;
+}
+
+.person-header {
+    background-color: #e8edf3;
+    border-bottom: 0.5pt solid #c8d0da;
+    padding: 4pt 8pt;
+    font-size: 10pt;
+    display: flex;
+    justify-content: space-between;
+}
+
+.person-label, .person-date-label {
+    font-weight: bold;
+    color: #1e3a5f;
+    margin-right: 6pt;
+}
+
+.person-date-label {
+    margin-left: 16pt;
+}
+
+.person-name, .person-date {
+    color: #1a1a1a;
+}
+
+/* ── Section block ──────────────────────────────────── */
+.section-block {
+    margin: 6pt 6pt 6pt 6pt;
+}
+
+.section-header {
+    font-size: 8.5pt;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #2e6da4;
+    border-bottom: 1pt solid #2e6da4;
+    padding-bottom: 2pt;
+    margin-bottom: 3pt;
+    page-break-after: avoid;
+}
+
+/* ── Q&A table ──────────────────────────────────────── */
+.qa-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 4pt;
+    font-size: 8.5pt;
+}
+
+.qa-table th {
+    width: 45%;
+    background-color: #f4f6f9;
+    font-weight: normal;
+    color: #333;
+    text-align: left;
+    vertical-align: top;
+    padding: 3pt 6pt;
+    border: 0.5pt solid #d8dde4;
+}
+
+.qa-table td {
+    background-color: #ffffff;
+    color: #1a1a1a;
+    vertical-align: top;
+    padding: 3pt 6pt;
+    border: 0.5pt solid #d8dde4;
+}
+
+.qa-table ul {
+    padding-left: 12pt;
+    margin: 0;
+}
+
+.qa-table li {
+    margin-bottom: 1pt;
+}
+
+.note-row td {
+    background-color: #fafbfc;
+    color: #555;
+    font-style: italic;
+    font-size: 8pt;
+    padding: 2pt 6pt;
+    border: 0.5pt solid #d8dde4;
+}
+"""
+
+
+def csv_to_pdf(title: str, days: DayData, output_path: Path) -> None:
+    body = build_html(title, days)
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <style>{CSS}</style>
+</head>
+<body>
+{body}
+</body>
+</html>"""
+    HTML(string=html).write_pdf(str(output_path))
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────
@@ -490,7 +625,7 @@ def main() -> None:
             print("No submissions match the toolbox talks; no PDF written.")
             sys.exit(1)
 
-    csv_to_pdf(title, records, output_path)
+    csv_to_pdf(title, group_by_day(records), output_path)
     print(f"PDF written to: {output_path}")
 
 
