@@ -1,43 +1,58 @@
 # csvToPdf
 
-Turns a question/answer CSV of employee records into a formatted PDF, optionally
-keeping only the records whose author was present on that date according to a
-second "presence" CSV.
+Renders exported FLRA (Field Level Risk Assessment) submissions to a PDF,
+keeping only the submissions whose author was present at the toolbox talk on
+the same day.
 
 ## Usage
 
 ```
-uv run python main.py <records.csv> [presence.csv] [output.pdf]
+uv run python main.py <flra.csv> [toolbox.csv] [output.pdf]
 ```
 
-- With only `records.csv`, every record is written to the PDF.
-- With `presence.csv`, a record is written only when its preparer is listed as
-  present on the record's date in the presence table.
-- `output.pdf` defaults to the records file name with a `.pdf` extension.
+- With only the FLRA export, every submission is written to the PDF.
+- With the toolbox export as well, a submission is written only when its
+  `Prepared By` name appears in that day's `Other Employees Present` list.
+- `output.pdf` defaults to the FLRA file name with a `.pdf` extension.
+- The command prints how many submissions were kept and lists each dropped one
+  with the reason (no toolbox talk that day, or not listed as present).
 
-## Records CSV
+Both files are the standard export with these columns:
 
-Columns: `PreparedBy`, `Date`, `Section`, `Question`, `Answer`.
+```
+Form Date, Prepared By, Section Title, Question Name, Answer: Type - Tab Delimited
+```
 
-A record is one preparer on one date. Rows with the same `PreparedBy` and
-`Date` are grouped into that record, and sections keep their order of first
-appearance.
+Rows may arrive in any order. Multi-select answers are tab delimited.
 
-If the sheet has no `Date` column, all of a preparer's rows form one record and
-its date is read from the row whose `Question` is `Date`. That row is shown in
-the record heading rather than repeated as a question.
+## FLRA export
 
-## Presence CSV
+One submission is the set of rows sharing a `Form Date` and `Prepared By`.
+Submissions are sorted by date then name, and each starts on a new page with
+the preparer and date in the heading. Sections follow the form's order
+(Project/Job Details, Tasks, PPE, risk ratings, hazards, final rating); any
+section not in that list follows in order of first appearance. Questions within
+a section keep the order they first appear in the file so every submission
+lays out the same way.
 
-Either layout is accepted:
+Tab-delimited answers are shown as a bulleted list, multi-line answers keep
+their line breaks, and blanks are shown as `N/A`.
 
-1. **Wide**: a `Date` column and an `Other Employees Present` column holding a
-   list of names separated by commas, semicolons, pipes or newlines.
-2. **Question/answer**: the same columns as the records CSV, with one row where
-   `Question` is `Other Employees Present` and the date coming from a `Date`
-   column or a row where `Question` is `Date`.
+The export carries no form id. If one person files two forms on the same day
+they are merged into one submission and each question that was answered
+differently is listed twice, once per answer.
 
-In both layouts the person named in `PreparedBy` also counts as present on that
-date. Names are matched ignoring case and extra whitespace. Dates are matched
-after normalising common formats (`2026-03-03`, `03/03/2026`, `March 3 2026`
+## Toolbox export
+
+The same column layout. For each toolbox talk the row whose `Question Name` is
+`Other Employees Present` supplies the tab-delimited list of names, and the
+`Form Date` supplies the date. The person in `Prepared By` counts as present
+too.
+
+A simpler wide layout is also accepted: a `Date` column and an
+`Other Employees Present` column holding names separated by tabs, commas,
+semicolons, pipes or newlines.
+
+Names are matched ignoring case and surrounding whitespace. Dates are compared
+after normalising common formats (`2026-09-08`, `09/08/2026`, `Sept 8 2026`
 and similar all compare equal).
