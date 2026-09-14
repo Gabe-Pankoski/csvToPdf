@@ -88,13 +88,13 @@ def split_names(value: str | None) -> list[str]:
 def format_answer(value: str | None) -> str:
     """Turn a raw answer into display text.
 
-    Tab-delimited multi-select answers become a bulleted list, multi-line
-    answers keep their line breaks, and blanks become ``N/A``.
+    Tab-delimited multi-select answers are joined with commas on one line,
+    multi-line answers keep their line breaks, and blanks become ``N/A``.
     """
     raw = value or ""
     if "\t" in raw:
         items = split_list(raw)
-        return "\n".join(f"- {item}" for item in items) if items else "N/A"
+        return ", ".join(items) if items else "N/A"
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     return "\n".join(lines) if lines else "N/A"
 
@@ -198,7 +198,7 @@ def parse_records(input_path: Path) -> tuple[str, Records]:
     whose date comes from the row whose question is ``Date``.
     """
     fieldnames, rows = read_rows(input_path)
-    title = input_path.stem.replace("_", " ")
+    title = input_path.stem
     if not rows:
         return title, {}
 

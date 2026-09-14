@@ -35,8 +35,8 @@ section not in that list follows in order of first appearance. Questions within
 a section keep the order they first appear in the file so every submission
 lays out the same way.
 
-Tab-delimited answers are shown as a bulleted list, multi-line answers keep
-their line breaks, and blanks are shown as `N/A`.
+Tab-delimited answers are joined with commas on one line, multi-line answers
+keep their line breaks, and blanks are shown as `N/A`.
 
 The export carries no form id. If one person files two forms on the same day
 they are merged into one submission and each question that was answered
